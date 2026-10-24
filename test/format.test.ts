@@ -2,11 +2,15 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   agenda,
+  awaitingPayment,
   bookingLine,
   formatMoney,
   formatSlots,
   hintForError,
+  normalizeBooking,
   paymentInfo,
+  paymentTypeIds,
+  requiresConfirmation,
   weeklyHours,
 } from '../src/calcom/format.js';
 import { CalApiError } from '../src/calcom/http.js';
@@ -64,6 +68,43 @@ describe('agenda', () => {
   it('formats one booking line with status, attendees and location', () => {
     const line = bookingLine(booking({ status: 'pending', location: 'integrations:daily', guests: ['g@example.com'] }), KL, 24);
     assert.equal(line, '- 10:00–10:30 · 30 Min Meeting · John Doe <john@example.com> +1 more · **pending confirmation** · Cal Video · uid `uid1`');
+  });
+});
+
+describe('bookings of paid event types', () => {
+  const paid = { id: 4, title: 'Paid', slug: 'paid', lengthInMinutes: 180, hidden: true, metadata: { apps: { hitpay: { enabled: true, price: 100000, currency: 'myr' } } } };
+  const paidWithConfirmation = { ...paid, id: 5, confirmationPolicy: { type: 'always' } };
+  const free = { id: 6, title: 'Free', slug: 'free', lengthInMinutes: 30, hidden: false, metadata: {} };
+
+  it('treats pending bookings of paid types without a confirmation step as awaiting payment', () => {
+    const paidTypes = paymentTypeIds([paid, paidWithConfirmation, free]);
+    assert.deepEqual([...paidTypes], [4]);
+    assert.equal(awaitingPayment(booking({ status: 'pending', eventTypeId: 4 }), paidTypes), true);
+    assert.equal(awaitingPayment(booking({ status: 'pending', eventType: { id: 5, slug: 'paid' } }), paidTypes), false);
+    assert.equal(awaitingPayment(booking({ status: 'accepted', eventTypeId: 4 }), paidTypes), false);
+    assert.match(bookingLine(booking({ status: 'pending', eventTypeId: 4 }), KL, 24, paidTypes), /· \*\*awaiting payment\*\* ·/);
+  });
+
+  it('keeps the JSON shape free of display copies and empty reasons', () => {
+    const json = normalizeBooking(booking({
+      status: 'pending',
+      eventTypeId: 4,
+      cancellationReason: '',
+      bookingFieldsResponses: { name: 'John Doe', company: 'TechMavie', displayEmail: 'john@example.com', displayGuests: [] },
+    }), KL, paymentTypeIds([paid]));
+    assert.equal(json.awaiting_payment, true);
+    assert.equal(json.cancellation_reason, null);
+    assert.deepEqual(json.booking_fields, { name: 'John Doe', company: 'TechMavie' });
+  });
+
+  it('reads the confirmation policy', () => {
+    assert.equal(requiresConfirmation({ confirmationPolicy: null }), undefined);
+    assert.equal(requiresConfirmation({ confirmationPolicy: { type: 'always', disabled: true } }), undefined);
+    assert.equal(requiresConfirmation({ confirmationPolicy: { type: 'always' } }), 'always');
+    assert.equal(
+      requiresConfirmation({ confirmationPolicy: { type: 'time', noticeThreshold: { count: 2, unit: 'hours' } } }),
+      'when booked less than 2 hours ahead',
+    );
   });
 });
 

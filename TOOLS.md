@@ -77,11 +77,11 @@ Change your Cal profile: name, time zone, week start, 12/24-hour clock, language
 
 **List bookings** · access `read` · read-only
 
-List bookings as an agenda grouped by day in your time zone. Default: upcoming bookings (including ones waiting for confirmation). Use when= for today / this_week / past / cancelled / a custom range, and filter by attendee or event type. Each line shows the booking uid used by the other booking tools.
+List bookings as an agenda grouped by day in your time zone. Default: upcoming bookings (including ones waiting for confirmation or payment). Use when= for today / this_week / past / cancelled / a custom range, and filter by attendee or event type. Each line shows the booking uid used by the other booking tools.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `when` | `upcoming` \| `unconfirmed` \| `past` \| `cancelled` \| `today` \| `tomorrow` \| `yesterday` \| `this_week` \| `next_week` \| `last_week` \| `next_7_days` \| `next_30_days` \| `past_7_days` \| `past_30_days` \| `this_month` \| `last_month` \| `custom` | No | upcoming (default) · unconfirmed (waiting for your confirmation) · past · cancelled · a date range preset · custom (with from/to). |
+| `when` | `upcoming` \| `unconfirmed` \| `past` \| `cancelled` \| `today` \| `tomorrow` \| `yesterday` \| `this_week` \| `next_week` \| `last_week` \| `next_7_days` \| `next_30_days` \| `past_7_days` \| `past_30_days` \| `this_month` \| `last_month` \| `custom` | No | upcoming (default) · unconfirmed (waiting for your confirmation or for payment) · past · cancelled · a date range preset · custom (with from/to). |
 | `from` | string | No | when="custom": start date "YYYY-MM-DD" or datetime, in time_zone. |
 | `to` | string | No | when="custom": end date (inclusive) or datetime. Default: same day as from. |
 | `status` | `upcoming` \| `recurring` \| `past` \| `cancelled` \| `unconfirmed`[] | No | Override Cal's status filter (OR-combined). Usually leave empty and use when. |
@@ -184,11 +184,12 @@ Cancel a booking; Cal notifies the attendees. Needs confirm: true after the user
 
 **Confirm a booking request** · access `bookings` · changes data (safe to repeat)
 
-Accept a booking that is waiting for your confirmation (list_bookings when="unconfirmed").
+Accept a booking that is waiting for your confirmation (list_bookings when="unconfirmed"). Bookings of paid event types that are still waiting for payment are refused unless allow_unpaid is true.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `booking_uid` | string | Yes | Booking uid, as shown by list_bookings / get_booking (e.g. "8bx2PqLmZt0aQd71"). |
+| `allow_unpaid` | boolean | No | Confirm a booking of a paid event type that is still waiting for payment (default false). |
 | `time_zone` | string | No | IANA time zone used to read and show times, e.g. "Asia/Kuala_Lumpur". Default: the time zone in your Cal profile. |
 
 ### `decline_booking`

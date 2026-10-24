@@ -141,7 +141,7 @@ Full parameter reference: **[TOOLS.md](TOOLS.md)** (generated from the code).
 | `create_booking` | bookings | Book someone into an event type — checks the time against open slots first and suggests alternatives |
 | `reschedule_booking` | bookings | Move a booking (slot-checked) |
 | `cancel_booking` | bookings ⚠️ | Cancel (attendees are notified) |
-| `confirm_booking` / `decline_booking` | bookings / ⚠️ | Handle bookings that need confirmation |
+| `confirm_booking` / `decline_booking` | bookings / ⚠️ | Handle bookings that need confirmation (bookings of paid event types still awaiting payment are refused unless `allow_unpaid: true`) |
 | `mark_no_show` | bookings | Mark host / attendees absent |
 | `add_booking_guests` / `remove_booking_attendee` | bookings / ⚠️ | Manage who is invited |
 | `update_booking_location` | bookings | Switch to a video app, link, address or phone |

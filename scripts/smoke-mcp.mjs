@@ -283,7 +283,10 @@ const calApi = http.createServer(async (req, res) => {
       case 'POST guests': booking.guests = [...booking.guests, ...body.guests.map(guest => guest.email)]; return ok(res, booking);
       case 'GET attendees': return ok(res, booking.attendees);
       case 'PATCH location': booking.location = body.location.link ?? body.location.address ?? body.location.integration; return ok(res, booking);
-      case 'GET calendar-links': return ok(res, [{ label: 'Google', link: 'https://calendar.google.com/x' }]);
+      case 'GET calendar-links': return ok(res, [
+        { label: 'Google', link: 'https://calendar.google.com/x?text=30 Min Meeting' },
+        { label: 'ICS', link: 'data:text/calendar,BEGIN%3AVCALENDAR%0D%0AEND%3AVCALENDAR' },
+      ]);
       case 'GET references': return ok(res, [{ id: 1, type: 'google_calendar', eventUid: 'g123', destinationCalendarId: 'primary' }]);
       case 'GET recordings': return fail(res, 400, 'BadRequestException', 'Cal Video is not configured');
       default:
@@ -335,6 +338,11 @@ const calApi = http.createServer(async (req, res) => {
     case 'GET /calendars/google/events': return ok(res, [{
       id: 'evt1', title: 'Dentist', start: { time: at(1, '08:00').toISOString(), timeZone: 'Asia/Kuala_Lumpur' }, end: { time: at(1, '09:00').toISOString(), timeZone: 'Asia/Kuala_Lumpur' },
       status: 'accepted', attendees: [{ email: 'hello@example.com', self: true }], source: 'google',
+    }, {
+      // All-day events arrive as an offset-less midnight in UTC, with an exclusive end date
+      id: 'evt2', title: 'Company retreat', start: { time: `${klDate(addDaysUtc(new Date(), 1))}T00:00:00`, timeZone: 'UTC' },
+      end: { time: `${klDate(addDaysUtc(new Date(), 3))}T00:00:00`, timeZone: 'UTC' }, status: 'accepted', source: 'google',
+      locations: [{ type: 'video', url: 'Menara KL, Kuala Lumpur' }], // Google's free-text location, typed "video" by Cal
     }]);
 
     case 'GET /conferencing': return ok(res, [{ id: 31, type: 'google_video', userId: 7, invalid: false }]);
@@ -537,7 +545,8 @@ try {
     const output = text(await reader.callTool({ name: 'get_booking', arguments: { booking_uid: 'up1', include: ['attendees', 'calendar_links', 'recordings'] } }));
     assert.match(output, /Attendee: Jane Tan <jane@example\.com> \(Asia\/Singapore, attendee id 2\)/);
     assert.match(output, /company: TechMavie/);
-    assert.match(output, /Google: https:\/\/calendar\.google\.com\/x/);
+    assert.match(output, /Google: https:\/\/calendar\.google\.com\/x\?text=30%20Min%20Meeting/);
+    assert.match(output, /ICS: inline file \(use format "json" to get it\)/);
     assert.match(output, /### recordings\n_Unavailable: Cal Video is not configured_/);
   });
 
@@ -569,7 +578,14 @@ try {
     const busy = text(await reader.callTool({ name: 'get_busy_times', arguments: { days: undefined } }));
     assert.match(busy, /13:00–14:00/);
     assert.match(busy, /1 calendar\(s\) checked/);
-    assert.match(text(await reader.callTool({ name: 'list_calendar_events', arguments: {} })), /08:00–09:00 · Dentist/);
+    const events = text(await reader.callTool({ name: 'list_calendar_events', arguments: {} }));
+    assert.match(events, /- all day until \w{3} \d{1,2} \w{3} \d{4} · Company retreat · at Menara KL, Kuala Lumpur\n- 08:00–09:00 · Dentist/);
+    const eventsJson = JSON.parse(text(await reader.callTool({ name: 'list_calendar_events', arguments: { format: 'json' } })));
+    const retreat = eventsJson.events.find(event => event.id === 'evt2');
+    assert.deepEqual(
+      [retreat.all_day, retreat.start, retreat.end, retreat.video, retreat.location],
+      [true, klDate(addDaysUtc(new Date(), 1)), klDate(addDaysUtc(new Date(), 2)), null, 'Menara KL, Kuala Lumpur'],
+    );
   });
 
   await check('schedules, video apps and webhooks (secrets never shown)', async () => {
@@ -672,6 +688,35 @@ try {
     assert.deepEqual(lastCal('POST', '/bookings/new1/guests').body, { guests: [{ email: 'cfo@example.com', timeZone: 'Europe/London' }] });
     assert.match(text(await booker.callTool({ name: 'update_booking_location', arguments: { booking_uid: 'new1', location: { type: 'link', value: 'https://zoom.us/j/1' } } })), /Location: https:\/\/zoom\.us\/j\/1/);
     assert.equal(lastCal('PATCH', '/bookings/new1/location').version, '2024-08-13');
+  });
+
+  await check('paid bookings awaiting payment are labelled, and confirm_booking needs allow_unpaid', async () => {
+    const paidType = {
+      id: 104, title: 'Paid Session', slug: 'paid-session', lengthInMinutes: 60, hidden: true, price: 0, currency: 'usd',
+      metadata: { apps: { hitpay: { enabled: true, price: 10000, currency: 'myr' } } }, locations: [], bookingFields: [],
+      confirmationPolicy: null, bookingUrl: 'https://book.example.com/aliff/paid-session', ownerId: 7,
+    };
+    eventTypes.push(paidType);
+    bookings.set('unpaid1', makeBooking('unpaid1', at(4, '10:00'), 60, 'pending', 104, {
+      bookingFieldsResponses: { name: 'John Doe', displayEmail: 'john@example.com', displayGuests: [] },
+    }));
+    try {
+      const details = text(await booker.callTool({ name: 'get_booking', arguments: { booking_uid: 'unpaid1' } }));
+      assert.match(details, /Status: \*\*awaiting payment\*\*/);
+      assert.doesNotMatch(details, /displayEmail|displayGuests/);
+      const list = text(await booker.callTool({ name: 'list_bookings', arguments: { when: 'unconfirmed' } }));
+      assert.match(list, /\*\*awaiting payment\*\* · .*uid `unpaid1`/);
+      assert.match(list, /confirm_booking would mark it accepted while unpaid/);
+      const refused = await booker.callTool({ name: 'confirm_booking', arguments: { booking_uid: 'unpaid1' } });
+      assert.equal(refused.isError, true);
+      assert.match(text(refused), /paid event type "Paid Session" \(MYR\s100\.00 via hitpay\) and is waiting for payment/);
+      assert.equal(countCal('POST', '/bookings/unpaid1/confirm'), 0);
+      assert.match(text(await booker.callTool({ name: 'confirm_booking', arguments: { booking_uid: 'unpaid1', allow_unpaid: true } })), /## Confirmed/);
+      assert.equal(countCal('POST', '/bookings/unpaid1/confirm'), 1);
+    } finally {
+      eventTypes.splice(eventTypes.indexOf(paidType), 1);
+      bookings.delete('unpaid1');
+    }
   });
 
   await check('remove_booking_attendee protects the primary attendee', async () => {

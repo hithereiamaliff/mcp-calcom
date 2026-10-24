@@ -43,10 +43,10 @@ export function markdownTable(columns: string[], rows: Array<Record<string, unkn
 // Bookings
 // =============================================================================
 
-export function statusLabel(status: string): string {
+export function statusLabel(status: string, awaitingPayment = false): string {
   switch (status) {
     case 'pending':
-      return '**pending confirmation**';
+      return awaitingPayment ? '**awaiting payment**' : '**pending confirmation**';
     case 'rejected':
       return 'declined';
     default:
@@ -76,13 +76,33 @@ export function bookingTimes(booking: Booking, timeZone: string, timeFormat: Tim
   return `${formatClock(start, timeZone, timeFormat)}–${endText}`;
 }
 
-export function bookingLine(booking: Booking, timeZone: string, timeFormat: TimeFormat): string {
+/**
+ * Ids of paid event types without a confirmation step. Cal keeps their bookings pending until the
+ * attendee pays, so a pending booking of one of these is waiting for payment, not for you.
+ */
+export function paymentTypeIds(eventTypes: EventType[]): Set<number> {
+  return new Set(eventTypes.filter(eventType => !requiresConfirmation(eventType) && paymentInfo(eventType)).map(eventType => eventType.id));
+}
+
+export function awaitingPayment(booking: Booking, paidTypes?: ReadonlySet<number>): boolean {
+  const eventTypeId = booking.eventType?.id ?? booking.eventTypeId;
+  return booking.status === 'pending' && eventTypeId !== undefined && Boolean(paidTypes?.has(eventTypeId));
+}
+
+const INTERNAL_RESPONSE_KEYS = new Set(['displayEmail', 'displayGuests']);
+
+/** Booking-form answers without the copies Cal adds for display (displayEmail, displayGuests) */
+export function bookingFieldAnswers(booking: Booking): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(booking.bookingFieldsResponses ?? {}).filter(([key]) => !INTERNAL_RESPONSE_KEYS.has(key)));
+}
+
+export function bookingLine(booking: Booking, timeZone: string, timeFormat: TimeFormat, paidTypes?: ReadonlySet<number>): string {
   const location = describeBookingLocation(booking.location);
   const parts = [
     bookingTimes(booking, timeZone, timeFormat),
     booking.title,
     attendeeSummary(booking),
-    statusLabel(booking.status),
+    statusLabel(booking.status, awaitingPayment(booking, paidTypes)),
     ...(location ? [location] : []),
     `uid \`${booking.uid}\``,
   ];
@@ -90,7 +110,13 @@ export function bookingLine(booking: Booking, timeZone: string, timeFormat: Time
 }
 
 /** Bookings grouped by calendar day (in timeZone), in start order (newest first when descending) */
-export function agenda(bookings: Booking[], timeZone: string, timeFormat: TimeFormat, descending = false): string[] {
+export function agenda(
+  bookings: Booking[],
+  timeZone: string,
+  timeFormat: TimeFormat,
+  descending = false,
+  paidTypes?: ReadonlySet<number>,
+): string[] {
   const direction = descending ? -1 : 1;
   const sorted = [...bookings].sort((a, b) => direction * (new Date(a.start).getTime() - new Date(b.start).getTime()));
   const currentYear = parseDate(todayIn(timeZone)).year;
@@ -102,13 +128,13 @@ export function agenda(bookings: Booking[], timeZone: string, timeFormat: TimeFo
       lines.push(`### ${formatDateLabel(day, currentYear)}`);
       currentDay = day;
     }
-    lines.push(bookingLine(booking, timeZone, timeFormat));
+    lines.push(bookingLine(booking, timeZone, timeFormat, paidTypes));
   }
   return lines;
 }
 
 /** Stable JSON shape for one booking (UTC and local times side by side) */
-export function normalizeBooking(booking: Booking, timeZone: string): Record<string, unknown> {
+export function normalizeBooking(booking: Booking, timeZone: string, paidTypes?: ReadonlySet<number>): Record<string, unknown> {
   const start = new Date(booking.start);
   const end = new Date(booking.end);
   return {
@@ -116,6 +142,7 @@ export function normalizeBooking(booking: Booking, timeZone: string): Record<str
     id: booking.id,
     title: booking.title,
     status: booking.status,
+    awaiting_payment: awaitingPayment(booking, paidTypes),
     start: booking.start,
     end: booking.end,
     start_local: localIso(start, timeZone),
@@ -136,9 +163,9 @@ export function normalizeBooking(booking: Booking, timeZone: string): Record<str
     hosts: (booking.hosts ?? []).map(host => ({ name: host.name, email: host.displayEmail || host.email, username: host.username })),
     absent_host: booking.absentHost ?? false,
     description: booking.description || null,
-    booking_fields: booking.bookingFieldsResponses ?? {},
-    cancellation_reason: booking.cancellationReason ?? null,
-    rescheduling_reason: booking.reschedulingReason ?? null,
+    booking_fields: bookingFieldAnswers(booking),
+    cancellation_reason: booking.cancellationReason || null,
+    rescheduling_reason: booking.reschedulingReason || null,
     rescheduled_from_uid: booking.rescheduledFromUid ?? null,
     rescheduled_to_uid: booking.rescheduledToUid ?? null,
     recurring_booking_uid: booking.recurringBookingUid ?? null,
@@ -147,13 +174,13 @@ export function normalizeBooking(booking: Booking, timeZone: string): Record<str
 }
 
 /** Human summary of one booking (detail view) */
-export function bookingDetails(booking: Booking, timeZone: string, timeFormat: TimeFormat): string[] {
+export function bookingDetails(booking: Booking, timeZone: string, timeFormat: TimeFormat, paidTypes?: ReadonlySet<number>): string[] {
   const start = new Date(booking.start);
   const lines = [
     `## ${booking.title}`,
     `- When: ${formatDateLabel(dateIn(start, timeZone))}, ${bookingTimes(booking, timeZone, timeFormat)} (${timeZone})` +
       ` — ${formatDuration(booking.duration ?? (new Date(booking.end).getTime() - start.getTime()) / 60_000)}`,
-    `- Status: ${statusLabel(booking.status)}`,
+    `- Status: ${statusLabel(booking.status, awaitingPayment(booking, paidTypes))}`,
     `- uid: \`${booking.uid}\`${booking.recurringBookingUid ? ` (recurring series \`${booking.recurringBookingUid}\`)` : ''}`,
   ];
   if (booking.eventType?.id || booking.eventTypeId) {
@@ -170,8 +197,10 @@ export function bookingDetails(booking: Booking, timeZone: string, timeFormat: T
   if (booking.guests?.length) lines.push(`- Guests: ${booking.guests.join(', ')}`);
   for (const host of booking.hosts ?? []) lines.push(`- Host: ${person({ name: host.name ?? '', email: host.email, displayEmail: host.displayEmail })}${booking.absentHost ? ' (marked absent)' : ''}`);
   if (booking.description) lines.push(`- Notes: ${booking.description.replace(/\s+/g, ' ').slice(0, 500)}`);
-  const responses = Object.entries(booking.bookingFieldsResponses ?? {}).filter(
-    ([key, value]) => !['name', 'email', 'guests', 'location', 'notes', 'title'].includes(key) && value !== '' && value !== null && value !== undefined,
+  const responses = Object.entries(bookingFieldAnswers(booking)).filter(
+    ([key, value]) =>
+      !['name', 'email', 'guests', 'location', 'notes', 'title', 'rescheduleReason'].includes(key) &&
+      value !== '' && value !== null && value !== undefined && !(Array.isArray(value) && value.length === 0),
   );
   for (const [key, value] of responses) lines.push(`- ${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
   if (booking.cancellationReason) lines.push(`- Cancellation reason: ${booking.cancellationReason}`);
@@ -291,6 +320,16 @@ export interface PaymentInfo {
   currency: string;
   /** Payment app slug (hitpay, stripe, …) when the price comes from an app */
   app?: string;
+}
+
+/** undefined when bookings never need your confirmation, otherwise when they do ("always", "when booked less than …") */
+export function requiresConfirmation(eventType: Pick<EventType, 'confirmationPolicy'>): string | undefined {
+  const policy = eventType.confirmationPolicy as { type?: string; disabled?: boolean; noticeThreshold?: { count?: number; unit?: string } } | null | undefined;
+  if (!policy || policy.disabled || !policy.type) return undefined;
+  if (policy.type === 'time' && policy.noticeThreshold) {
+    return `when booked less than ${policy.noticeThreshold.count} ${policy.noticeThreshold.unit} ahead`;
+  }
+  return 'always';
 }
 
 /** Price of a paid event type: payment apps keep it in metadata.apps.<app>, older data in price */

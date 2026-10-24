@@ -13,6 +13,8 @@ import {
   endOfDay,
   formatClock,
   formatDateLabel,
+  formatDuration,
+  formatInstant,
   formatRangeLabel,
   localIso,
   parseDate,
@@ -78,8 +80,45 @@ function datesBetween(fromDate: string, toDate: string): string[] {
   return dates;
 }
 
+/** A time without an offset is a wall time in the event's own time zone */
 function eventTime(value: UnifiedCalendarEvent['start']): Date {
-  return new Date(typeof value === 'string' ? value : value.time);
+  if (typeof value === 'string') return new Date(value);
+  try {
+    return parseDateTime(value.time, value.timeZone || 'UTC', 'event time');
+  } catch {
+    return new Date(value.time);
+  }
+}
+
+/** Cal sends all-day events as an offset-less midnight in UTC ("2026-10-27T00:00:00") */
+function allDayDate(value: UnifiedCalendarEvent['start']): string | undefined {
+  if (typeof value === 'string') return undefined;
+  const match = /^(\d{4}-\d{2}-\d{2})T00:00:00$/.exec(value.time);
+  return match && (value.timeZone || 'UTC') === 'UTC' ? match[1] : undefined;
+}
+
+interface EventSpan {
+  start: Date;
+  end: Date;
+  /** All-day events: first and last day (Google's end date is exclusive) */
+  days?: { first: string; last: string };
+}
+
+/** Cal types Google's free-text location as "video" too — only a URL is a meeting link */
+function eventPlace(event: UnifiedCalendarEvent): { video?: string; location?: string } {
+  const value = event.locations?.find(location => location.type === 'video')?.url?.trim();
+  if (!value) return {};
+  return /^https?:\/\//i.test(value) ? { video: value } : { location: value };
+}
+
+function eventSpan(event: UnifiedCalendarEvent, timeZone: string): EventSpan {
+  const first = allDayDate(event.start);
+  if (first) {
+    const endDate = allDayDate(event.end);
+    const last = endDate && daysBetween(first, endDate) > 0 ? addDays(endDate, -1) : first;
+    return { start: startOfDay(first, timeZone), end: endOfDay(last, timeZone), days: { first, last } };
+  }
+  return { start: eventTime(event.start), end: eventTime(event.end) };
 }
 
 export function registerAvailabilityTools(server: McpServer, ctx: ToolContext): void {
@@ -148,6 +187,11 @@ export function registerAvailabilityTools(server: McpServer, ctx: ToolContext): 
             `(${summary.first.toISOString()}) · ${summary.total} open slot(s).`
           : 'No open slots in this range — try a later start date or a longer range.',
       ];
+      const notice = target.eventType?.minimumBookingNotice ?? 0;
+      const earliest = new Date(Date.now() + notice * 60_000);
+      if (notice > 0 && range.from.getTime() < earliest.getTime()) {
+        lines.push(`_Minimum notice is ${formatDuration(notice)}: nothing before ${formatInstant(earliest, d.timeZone, d.timeFormat)} can be booked._`);
+      }
       if (summary.first && target.id) {
         lines.push(`_To book: create_booking with event_type_id ${target.id} and start "YYYY-MM-DD HH:mm" (in ${d.timeZone})._`);
       }
@@ -324,21 +368,25 @@ export function registerAvailabilityTools(server: McpServer, ctx: ToolContext): 
         to: range.to.toISOString(),
         timeZone: d.timeZone,
         calendarId: args.calendar_id,
-      })).sort((a, b) => eventTime(a.start).getTime() - eventTime(b.start).getTime());
+      }))
+        .map(event => ({ event, span: eventSpan(event, d.timeZone) }))
+        .sort((a, b) => a.span.start.getTime() - b.span.start.getTime());
 
       if (args.format === 'json') {
         return jsonResult({
           time_zone: d.timeZone,
           from: range.fromDate,
           to: range.toDate,
-          events: events.map(event => ({
+          events: events.map(({ event, span }) => ({
             id: event.id,
             title: event.title ?? null,
-            start: localIso(eventTime(event.start), d.timeZone),
-            end: localIso(eventTime(event.end), d.timeZone),
+            all_day: Boolean(span.days),
+            start: span.days ? span.days.first : localIso(span.start, d.timeZone),
+            end: span.days ? span.days.last : localIso(span.end, d.timeZone),
             status: event.status ?? null,
             attendees: (event.attendees ?? []).map(attendee => ({ email: attendee.email, name: attendee.name, response: attendee.responseStatus })),
-            video: event.locations?.find(location => location.type === 'video')?.url ?? null,
+            video: eventPlace(event).video ?? null,
+            location: eventPlace(event).location ?? null,
           })),
         });
       }
@@ -346,18 +394,20 @@ export function registerAvailabilityTools(server: McpServer, ctx: ToolContext): 
       const lines = [`## Google Calendar · ${formatRangeLabel(range.fromDate, range.toDate)} · ${d.timeZone}`];
       if (!events.length) lines.push('_No events._');
       let currentDay = '';
-      for (const event of events) {
-        const start = eventTime(event.start);
-        const end = eventTime(event.end);
-        const day = dateIn(start, d.timeZone);
+      for (const { event, span } of events) {
+        const day = span.days?.first ?? dateIn(span.start, d.timeZone);
         if (day !== currentDay) {
           lines.push(`### ${formatDateLabel(day)}`);
           currentDay = day;
         }
         const others = (event.attendees ?? []).filter(attendee => !attendee.self).length;
-        const video = event.locations?.find(location => location.type === 'video')?.url;
-        lines.push(`- ${formatClock(start, d.timeZone, d.timeFormat)}–${formatClock(end, d.timeZone, d.timeFormat)} · ${event.title || '(no title)'}` +
-          `${event.status && event.status !== 'accepted' ? ` · ${event.status}` : ''}${others ? ` · ${others} other attendee(s)` : ''}${video ? ` · ${video}` : ''}`);
+        const { video, location } = eventPlace(event);
+        const when = span.days
+          ? `all day${span.days.last !== span.days.first ? ` until ${formatDateLabel(span.days.last)}` : ''}`
+          : `${formatClock(span.start, d.timeZone, d.timeFormat)}–${formatClock(span.end, d.timeZone, d.timeFormat)}`;
+        lines.push(`- ${when} · ${event.title || '(no title)'}` +
+          `${event.status && event.status !== 'accepted' ? ` · ${event.status}` : ''}${others ? ` · ${others} other attendee(s)` : ''}` +
+          `${video ? ` · ${video}` : ''}${location ? ` · at ${location}` : ''}`);
       }
       return textResult(lines.join('\n'));
     }),

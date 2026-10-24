@@ -7,7 +7,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { formatMoney, markdownTable, paymentInfo } from '../calcom/format.js';
+import { formatMoney, markdownTable, paymentInfo, requiresConfirmation } from '../calcom/format.js';
 import { describeEventTypeLocation, locationInputSchema, toEventTypeLocation } from '../calcom/locations.js';
 import { endOfDay, formatDuration, formatInstant, parseDateTime } from '../calcom/time.js';
 import type { EventType, PrivateLink } from '../calcom/types.js';
@@ -33,15 +33,6 @@ import {
 // =============================================================================
 // Describing event types
 // =============================================================================
-
-function requiresConfirmation(eventType: EventType): string | undefined {
-  const policy = eventType.confirmationPolicy as { type?: string; disabled?: boolean; noticeThreshold?: { count?: number; unit?: string } } | null | undefined;
-  if (!policy || policy.disabled || !policy.type) return undefined;
-  if (policy.type === 'time' && policy.noticeThreshold) {
-    return `when booked less than ${policy.noticeThreshold.count} ${policy.noticeThreshold.unit} ahead`;
-  }
-  return 'always';
-}
 
 function lengthText(eventType: EventType): string {
   const options = eventType.lengthInMinutesOptions?.length ? ` (options ${eventType.lengthInMinutesOptions.join(' / ')} min)` : '';

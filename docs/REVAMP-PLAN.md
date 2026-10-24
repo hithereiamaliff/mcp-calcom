@@ -1,7 +1,8 @@
 # Cal.com / Cal.diy MCP — Revamp Plan (v2.0.0)
 
 > Status: **IMPLEMENTED on branches** (2026-10-24) — approved as drafted (D1–D8). Nothing pushed to `main` in
-> mcp-calcom or mcp-key-service; Phase 0 is PR hithereiamaliff/cal.diy#5 (open, not merged). See §13.
+> mcp-calcom or mcp-key-service. Phase 0 is done: PR hithereiamaliff/cal.diy#5 merged, API v2 runs at
+> `https://book.techmavie.digital/api/v2`, and the read-only live check passes (20/20). See §13.
 > Target: rebuild `mcp-calcom` on the **mcp-plausibleanalytics v2** codebase (itself the mcp-github v2 skeleton +
 > the ghostcms key-service resolver), **Cal.diy-first** (your self-hosted instance, API v2) and compatible with
 > Cal.com Cloud, integrated with **mcp-key-service**.
@@ -650,13 +651,14 @@ A Smithery endpoint. npm publishing.
 
 ## 13. Implementation notes (2026-10-24)
 
-**Where the work is** (nothing merged or deployed):
+**Where the work is** (the MCP and the connector are not merged or deployed yet):
 
 | Repo | Branch / PR | Contents |
 |---|---|---|
-| mcp-calcom | `revamp/v2` (9 commits on top of `b0e6bf9`, ending with these notes) | Everything in §2–§7 |
+| mcp-calcom | `revamp/v2` (on top of `b0e6bf9`) | Everything in §2–§7, plus the live-check fixes below |
 | mcp-key-service | `feat/calcom-connector` (`875ba9b`) | `calcom` connector, README, `.env.sample`, landing copy, smoke test |
-| cal.diy fork | `feat/api-v2-image` → PR #5 | API v2 image workflow, `techmavie/API-V2.md`, `techmavie/README.md` |
+| cal.diy fork | PR #5, squash-merged as `f9442c7` | API v2 image workflow, `techmavie/API-V2.md`, `techmavie/README.md` |
+| VPS | `/opt/calcom` | `calcom-api` on 127.0.0.1:5555 (shares `calcom-redis`), nginx `location /api/v2/` |
 
 **Delivered as planned**, with these findings, deviations and additions:
 
@@ -674,26 +676,37 @@ A Smithery endpoint. npm publishing.
 | TOOLS.md | Generated from the registered tools at each access level, including every tool's minimum access level |
 | Tool count | 39 as planned: 17 / 28 / 39 for read / bookings / full; 7 destructive tools require `confirm: true` |
 
+**Found by the live check** against book.techmavie.digital (fixed on `revamp/v2`):
+
+| Item | Note |
+|---|---|
+| Unpaid bookings | Cal keeps a booking of a paid event type `pending` until the attendee pays, and the v2 booking output has no payment field. Bookings of paid types without a confirmation step now show as **awaiting payment** (`awaiting_payment` in JSON, its own row in `get_booking_summary`) instead of "pending confirmation". `confirm_booking` refuses them unless `allow_unpaid: true`: Cal's confirm handler (`confirm.handler.ts`, used by API v2) just sets an unpaid booking to ACCEPTED, with no emails, calendar event or payment |
+| All-day Google events | The unified calendar API sends them as an offset-less midnight in UTC (`"2026-09-25T00:00:00"`, exclusive end date), which `new Date()` read as server-local time. They now show as "all day" / "all day until …" (dates in JSON) |
+| Google event locations | Cal types Google's free-text location as `video`; only URLs are treated as meeting links, anything else is shown as a place (`location` in JSON) |
+| Smaller fixes | Minimum-notice hint in `get_available_slots`; Cal's `displayEmail` / `displayGuests` copies hidden from booking-form answers; calendar links with spaces encoded and the inline ICS file collapsed; `—` instead of `0%` for 0 → 0 |
+
 **Verification**
 
 - `npm run typecheck` — clean.
-- `npm test` — 72/72 unit tests (connection rules + SSRF guard, key-service resolver, version map, DST-safe time
-  conversion and presets, HTTP client, formatting / hints, locations, tool registration per access level incl. no
-  `$ref` / no header parameters / confirm without API calls).
-- `npm run smoke` — 45/45 end-to-end checks: built HTTP server and CLI against a fake key service and a fake Cal API
+- `npm test` — 75/75 unit tests (connection rules + SSRF guard, key-service resolver, version map, DST-safe time
+  conversion and presets, HTTP client, formatting / hints, paid-booking status, locations, tool registration per
+  access level incl. no `$ref` / no header parameters / confirm without API calls).
+- `npm run smoke` — 46/46 end-to-end checks: built HTTP server and CLI against a fake key service and a fake Cal API
   v2 that enforces the API key and per-endpoint versions; hosted path / query / Bearer, self-hosted and stdio modes;
-  access-level gating; slot pre-check; paid-type refusal; web-app-URL and bad-key diagnosis; 401 / 403 / 405 / 503;
-  SSRF rejection; analytics gating; no keys in logs or analytics.
+  access-level gating; slot pre-check; paid-type refusal; awaiting-payment label and confirm guard; all-day events;
+  web-app-URL and bad-key diagnosis; 401 / 403 / 405 / 503; SSRF rejection; analytics gating; no keys in logs or
+  analytics.
+- `npm run live-check` — 20/20 read tools against the real instance (read access forced), plus wider-range reads:
+  slots match the schedule and 2-day minimum notice, busy times and Google events return real entries.
 - Docker stages replayed without Docker (no local Docker): build → production-only install → `/health` OK, `/mcp`
   without auth → 401. `npm pack` contains only `dist/`, README, LICENSE, package.json. Workflow and compose YAML parse.
 - mcp-key-service: `npm test` passes with the calcom register / resolve / cross-server checks.
 
 **Still to do (needs you / the VPS)** — §5 and §8:
 
-1. Merge cal.diy PR #5 → wait for the API image → `techmavie/API-V2.md` on the VPS (secret, compose, nginx) →
-   create a Cal API key → `curl …/api/v2/me`.
-2. `npm run live-check` here with that key in `.env` (read-only) — booking writes only on your go-ahead, against a
-   hidden test event type.
+1. ~~Merge cal.diy PR #5, deploy API v2 on the VPS, create a Cal API key.~~ Done 2026-10-24.
+2. ~~`npm run live-check` (read-only).~~ Done 2026-10-24. Booking writes only on your go-ahead, against a hidden test
+   event type.
 3. Add `calcom:<token>` to `INTERNAL_SERVER_TOKENS`, push `feat/calcom-connector` (redeploys the key service).
 4. `/opt/mcp-servers/calcom/.env`, nginx `location /calcom/`, GitHub secrets, then push `revamp/v2` → `main`.
 

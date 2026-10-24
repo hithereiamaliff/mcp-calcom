@@ -9,12 +9,15 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
   agenda,
+  awaitingPayment,
   bookingDetails,
   bookingTimes,
   formatMoney,
   markdownTable,
   normalizeBooking,
   paymentInfo,
+  paymentTypeIds,
+  requiresConfirmation,
   slotStart,
   statusLabel,
 } from '../calcom/format.js';
@@ -196,6 +199,19 @@ async function slotProblem(
   ].join(' ');
 }
 
+/**
+ * Paid event types whose pending bookings are waiting for payment — only fetched when there is a
+ * pending booking to label.
+ */
+async function paidTypesFor(ctx: ToolContext, bookings: Booking[]): Promise<Set<number> | undefined> {
+  if (!bookings.some(booking => booking.status === 'pending')) return undefined;
+  const eventTypes = await ctx.client.listEventTypes().catch(() => undefined);
+  return eventTypes ? paymentTypeIds(eventTypes) : undefined;
+}
+
+const AWAITING_PAYMENT_NOTE =
+  'Cal confirms a booking awaiting payment once the attendee pays; confirm_booking would mark it accepted while unpaid.';
+
 // =============================================================================
 // Summary statistics
 // =============================================================================
@@ -205,6 +221,7 @@ interface Stats {
   active: number;
   accepted: number;
   pending: number;
+  awaitingPayment: number;
   cancelled: number;
   declined: number;
   completed: number;
@@ -233,8 +250,9 @@ function computeStats(bookings: Booking[], eventTypes: Map<number, EventType>, t
   const attendees = new Map<string, { email: string; name: string; count: number }>();
   const reasons = new Map<string, number>();
   const revenue: Record<string, number> = {};
+  const paidTypes = paymentTypeIds([...eventTypes.values()]);
   const stats = {
-    total: bookings.length, active: 0, accepted: 0, pending: 0, cancelled: 0, declined: 0,
+    total: bookings.length, active: 0, accepted: 0, pending: 0, awaitingPayment: 0, cancelled: 0, declined: 0,
     completed: 0, upcoming: 0, bookedMinutes: 0, noShows: 0, hostNoShows: 0,
   };
 
@@ -276,7 +294,9 @@ function computeStats(bookings: Booking[], eventTypes: Map<number, EventType>, t
     }
 
     if (booking.status === 'pending') {
-      stats.pending++;
+      if (awaitingPayment(booking, paidTypes)) stats.awaitingPayment++;
+      else stats.pending++;
+      if (!ended) stats.upcoming++;
       continue;
     }
 
@@ -299,7 +319,6 @@ function computeStats(bookings: Booking[], eventTypes: Map<number, EventType>, t
   const attendeeList = [...attendees.values()];
   return {
     ...stats,
-    upcoming: stats.upcoming + stats.pending,
     uniqueAttendees: attendeeList.length,
     repeatAttendees: attendeeList.filter(attendee => attendee.count > 1).length,
     byEventType: [...byEventType.values()].sort((a, b) => b.count - a.count || b.cancelled - a.cancelled),
@@ -327,7 +346,7 @@ async function fetchAllBookings(
 }
 
 function change(current: number, previous: number): string {
-  if (previous === 0) return current === 0 ? '0%' : 'new';
+  if (previous === 0) return current === 0 ? '—' : 'new';
   const percent = Math.round(((current - previous) / previous) * 100);
   return `${percent > 0 ? '+' : ''}${percent}%`;
 }
@@ -341,12 +360,12 @@ function revenueText(revenue: Record<string, number>): string {
 // Output helpers
 // =============================================================================
 
-function bookedSummary(booking: Booking, d: Display, heading: string): string[] {
+function bookedSummary(booking: Booking, d: Display, heading: string, paidTypes?: ReadonlySet<number>): string[] {
   const location = describeBookingLocation(booking.location);
   return [
     `## ${heading}: ${booking.title}`,
     `- When: ${formatDateLabel(dateIn(new Date(booking.start), d.timeZone))}, ${bookingTimes(booking, d.timeZone, d.timeFormat)} (${d.timeZone})`,
-    `- Status: ${statusLabel(booking.status)}`,
+    `- Status: ${statusLabel(booking.status, awaitingPayment(booking, paidTypes))}`,
     `- uid: \`${booking.uid}\``,
     ...(location ? [`- Location: ${location}`] : []),
     ...(booking.attendees ?? []).map(attendee => `- Attendee: ${attendee.name} <${attendee.displayEmail || attendee.email}>`),
@@ -376,13 +395,13 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
       title: 'List bookings',
       description:
         'List bookings as an agenda grouped by day in your time zone. Default: upcoming bookings (including ones ' +
-        'waiting for confirmation). Use when= for today / this_week / past / cancelled / a custom range, and filter by ' +
+        'waiting for confirmation or payment). Use when= for today / this_week / past / cancelled / a custom range, and filter by ' +
         'attendee or event type. Each line shows the booking uid used by the other booking tools.',
       inputSchema: {
         when: z
           .enum(LIST_WHEN)
           .optional()
-          .describe('upcoming (default) · unconfirmed (waiting for your confirmation) · past · cancelled · a date range preset · custom (with from/to).'),
+          .describe('upcoming (default) · unconfirmed (waiting for your confirmation or for payment) · past · cancelled · a date range preset · custom (with from/to).'),
         from: z.string().optional().describe('when="custom": start date "YYYY-MM-DD" or datetime, in time_zone.'),
         to: z.string().optional().describe('when="custom": end date (inclusive) or datetime. Default: same day as from.'),
         status: z
@@ -418,7 +437,7 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
           break;
         case 'unconfirmed':
           statuses = ['unconfirmed'];
-          label = 'Bookings waiting for confirmation';
+          label = 'Bookings waiting for confirmation or payment';
           break;
         case 'past':
           statuses = ['past'];
@@ -449,12 +468,13 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
       const { bookings, pagination } = await ctx.client.listBookings(query);
       const total = pagination?.totalItems;
       const hasMore = pagination?.hasNextPage ?? bookings.length === limit;
+      const paidTypes = await paidTypesFor(ctx, bookings);
 
       if (args.format === 'json') {
         return jsonResult({
           time_zone: d.timeZone,
           range: label,
-          bookings: bookings.map(booking => normalizeBooking(booking, d.timeZone)),
+          bookings: bookings.map(booking => normalizeBooking(booking, d.timeZone, paidTypes)),
           pagination: { offset, returned: bookings.length, total: total ?? null, has_more: hasMore },
         });
       }
@@ -468,14 +488,16 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
 
       const lines = [`## ${label} · ${d.timeZone}`];
       if (filters.length) lines.push(`_Filtered by ${filters.join(', ')}._`);
-      lines.push(...(bookings.length ? agenda(bookings, d.timeZone, d.timeFormat, descending) : ['_No bookings found._']));
+      lines.push(...(bookings.length ? agenda(bookings, d.timeZone, d.timeFormat, descending, paidTypes) : ['_No bookings found._']));
       if (bookings.length) {
-        const pending = bookings.filter(booking => booking.status === 'pending').length;
+        const pending = bookings.filter(booking => booking.status === 'pending');
+        const unpaid = pending.filter(booking => awaitingPayment(booking, paidTypes)).length;
         const footer = total !== undefined
           ? `Showing ${offset + 1}–${offset + bookings.length} of ${total}.`
           : `${bookings.length} booking(s).`;
         lines.push('', `_${footer}${hasMore ? ` Call again with offset=${offset + bookings.length} for more.` : ''}` +
-          `${pending ? ' Pending bookings can be handled with confirm_booking / decline_booking.' : ''}_`);
+          `${pending.length > unpaid ? ' Pending bookings can be handled with confirm_booking / decline_booking.' : ''}` +
+          `${unpaid ? ` ${AWAITING_PAYMENT_NOTE}` : ''}_`);
       }
       return textResult(lines.join('\n'));
     }),
@@ -527,18 +549,21 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
         return [name, result.status === 'fulfilled' ? result.value : { error: result.reason instanceof Error ? result.reason.message : String(result.reason) }];
       }));
 
+      const paidTypes = await paidTypesFor(ctx, occurrences);
+
       if (args.format === 'json') {
         return jsonResult({
           time_zone: d.timeZone,
-          booking: normalizeBooking(booking, d.timeZone),
-          ...(occurrences.length > 1 ? { occurrences: occurrences.map(occurrence => normalizeBooking(occurrence, d.timeZone)) } : {}),
+          booking: normalizeBooking(booking, d.timeZone, paidTypes),
+          ...(occurrences.length > 1 ? { occurrences: occurrences.map(occurrence => normalizeBooking(occurrence, d.timeZone, paidTypes)) } : {}),
           ...extras,
         });
       }
 
-      const lines = bookingDetails(booking, d.timeZone, d.timeFormat);
+      const lines = bookingDetails(booking, d.timeZone, d.timeFormat, paidTypes);
+      if (awaitingPayment(booking, paidTypes)) lines.push(`_${AWAITING_PAYMENT_NOTE}_`);
       if (occurrences.length > 1) {
-        lines.push('', `### Recurring series — ${occurrences.length} occurrences`, ...agenda(occurrences, d.timeZone, d.timeFormat));
+        lines.push('', `### Recurring series — ${occurrences.length} occurrences`, ...agenda(occurrences, d.timeZone, d.timeFormat, false, paidTypes));
       }
       for (const name of includes) {
         const value = extras[name];
@@ -559,7 +584,9 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
             }))));
             break;
           case 'calendar_links':
-            lines.push(...(list as Array<{ label: string; link: string }>).map(link => `- ${link.label}: ${link.link}`));
+            lines.push(...(list as Array<{ label: string; link: string }>).map(link => link.link.startsWith('data:')
+              ? `- ${link.label}: inline file (use format "json" to get it)`
+              : `- ${link.label}: ${link.link.replace(/ /g, '%20')}`));
             break;
           case 'references':
             lines.push(markdownTable(['type', 'event_uid', 'calendar'], (list as Array<Record<string, unknown>>).map(reference => ({
@@ -665,6 +692,9 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
         ['bookings (not cancelled)', String(stats.active), before ? String(before.active) : undefined],
         ['accepted', String(stats.accepted), before ? String(before.accepted) : undefined],
         ['waiting for confirmation', String(stats.pending), before ? String(before.pending) : undefined],
+        ...(stats.awaitingPayment || before?.awaitingPayment
+          ? [['awaiting payment', String(stats.awaitingPayment), before ? String(before.awaitingPayment) : undefined] as [string, string, string?]]
+          : []),
         ['cancelled / declined', `${stats.cancelled + stats.declined}${stats.total ? ` (${Math.round(((stats.cancelled + stats.declined) / stats.total) * 100)}%)` : ''}`, before ? String(before.cancelled + before.declined) : undefined],
         ['booked time (accepted)', formatDuration(stats.bookedMinutes), before ? formatDuration(before.bookedMinutes) : undefined],
         ['attendee no-shows', String(stats.noShows), before ? String(before.noShows) : undefined],
@@ -697,7 +727,7 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
       }
       if (stats.active) {
         const weekdays = [1, 2, 3, 4, 5, 6, 0].filter(day => stats.byWeekday[day] > 0)
-          .map(day => `${weekdayName(day).slice(0, 3)} ${stats.byWeekday[day]}`);
+          .map(day => `${weekdayName(day).slice(0, 3)} (${stats.byWeekday[day]})`);
         lines.push('', `### Busiest days\n${weekdays.join(' · ')}`);
         lines.push('', `### Busiest start hours\n${stats.byHour.slice(0, 5).map(({ hour, count }) => `${String(hour).padStart(2, '0')}:00 (${count})`).join(' · ')}`);
       }
@@ -793,10 +823,15 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
       };
 
       const { booking, count } = firstBooking(await ctx.client.createBooking(body));
-      const lines = bookedSummary(booking, d, 'Booked');
+      const paidTypes = target.eventType ? paymentTypeIds([target.eventType]) : undefined;
+      const lines = bookedSummary(booking, d, 'Booked', paidTypes);
       if (count > 1) lines.push(`- Recurring: ${count} occurrences booked (first shown).`);
-      if (booking.status === 'pending') lines.push('', '_This event type requires confirmation — the booking stays pending until it is confirmed (confirm_booking)._');
-      if (price) lines.push('', '_No payment was collected for this paid event type._');
+      if (awaitingPayment(booking, paidTypes)) {
+        lines.push('', '_No payment was collected, so Cal keeps this booking pending until it is paid._');
+      } else {
+        if (booking.status === 'pending') lines.push('', '_This event type requires confirmation — the booking stays pending until it is confirmed (confirm_booking)._');
+        if (price) lines.push('', '_No payment was collected for this paid event type._');
+      }
       return textResult(lines.join('\n'));
     }),
   );
@@ -898,12 +933,34 @@ export function registerBookingTools(server: McpServer, ctx: ToolContext): void 
     'confirm_booking',
     {
       title: 'Confirm a booking request',
-      description: 'Accept a booking that is waiting for your confirmation (list_bookings when="unconfirmed").',
-      inputSchema: { booking_uid: bookingUidParam, time_zone: timeZoneParam },
+      description:
+        'Accept a booking that is waiting for your confirmation (list_bookings when="unconfirmed"). Bookings of paid ' +
+        'event types that are still waiting for payment are refused unless allow_unpaid is true.',
+      inputSchema: {
+        booking_uid: bookingUidParam,
+        allow_unpaid: z.boolean().optional().describe('Confirm a booking of a paid event type that is still waiting for payment (default false).'),
+        time_zone: timeZoneParam,
+      },
       annotations: WRITE_IDEMPOTENT,
     },
     async args => runTool(async () => {
       const d = await display(ctx, args.time_zone);
+      if (!args.allow_unpaid) {
+        const { booking: current } = firstBooking(await ctx.client.getBooking(args.booking_uid));
+        const eventTypeId = current.eventType?.id ?? current.eventTypeId;
+        const eventType = current.status === 'pending' && eventTypeId
+          ? await ctx.client.getEventType(eventTypeId).catch(() => undefined)
+          : undefined;
+        const price = eventType && !requiresConfirmation(eventType) ? paymentInfo(eventType) : undefined;
+        if (eventType && price) {
+          throw new ToolInputError(
+            `Booking \`${current.uid}\` is for the paid event type "${eventType.title}" (${formatMoney(price.amount, price.currency)}` +
+            `${price.app ? ` via ${price.app}` : ''}) and is waiting for payment — Cal confirms it by itself once the attendee pays. ` +
+            'Confirming it now marks it accepted while unpaid, and Cal skips the confirmation emails and the calendar event for ' +
+            'unpaid bookings. Call again with allow_unpaid: true to confirm it anyway, or use decline_booking / cancel_booking to free the slot.',
+          );
+        }
+      }
       const { booking } = firstBooking(await ctx.client.confirmBooking(args.booking_uid));
       return textResult(bookedSummary(booking, d, 'Confirmed').join('\n'));
     }),
