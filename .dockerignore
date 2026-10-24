@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+.env.*
+!.env.sample
+data
+.credentials
+test
+scripts
+docs
+deploy
+*.md
+.git
+.github
