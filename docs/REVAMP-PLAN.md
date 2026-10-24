@@ -1,7 +1,7 @@
 # Cal.com / Cal.diy MCP — Revamp Plan (v2.0.0)
 
-> Status: **DRAFT — awaiting your review** (2026-10-24; VPS answers added the same day, §9). Nothing implemented,
-> nothing committed, nothing pushed.
+> Status: **IMPLEMENTED on branches** (2026-10-24) — approved as drafted (D1–D8). Nothing pushed to `main` in
+> mcp-calcom or mcp-key-service; Phase 0 is PR hithereiamaliff/cal.diy#5 (open, not merged). See §13.
 > Target: rebuild `mcp-calcom` on the **mcp-plausibleanalytics v2** codebase (itself the mcp-github v2 skeleton +
 > the ghostcms key-service resolver), **Cal.diy-first** (your self-hosted instance, API v2) and compatible with
 > Cal.com Cloud, integrated with **mcp-key-service**.
@@ -647,6 +647,55 @@ A Smithery endpoint. npm publishing.
   - `hithereiamaliff/mcp-keywords-everywhere` (429 backoff, fail-fast key-service config)
   - `mcp-key-service` commit `c7fa45a`
 - `hithereiamaliff/mcpvps-deploymentguide`: `mcp-revamp-guide.md`, `mcp-remote-debugging-lessons.md`
+
+## 13. Implementation notes (2026-10-24)
+
+**Where the work is** (nothing merged or deployed):
+
+| Repo | Branch / PR | Contents |
+|---|---|---|
+| mcp-calcom | `revamp/v2` (9 commits on top of `b0e6bf9`, ending with these notes) | Everything in §2–§7 |
+| mcp-key-service | `feat/calcom-connector` (`875ba9b`) | `calcom` connector, README, `.env.sample`, landing copy, smoke test |
+| cal.diy fork | `feat/api-v2-image` → PR #5 | API v2 image workflow, `techmavie/API-V2.md`, `techmavie/README.md` |
+
+**Delivered as planned**, with these findings, deviations and additions:
+
+| Item | Note |
+|---|---|
+| Version headers | Event-type sub-resources must **not** get `cal-api-version: 2024-06-14`: the private-links controller has no version, so the header makes it 404. `versions.ts` sends a header only to bookings / event types themselves / schedules / slots; unit and smoke tests (the fake API 404s like the real one) cover it |
+| Busy times | The spec flattens the query; the real endpoint wants `calendarsToLoad[i][credentialId]` / `[externalId]` (qs syntax) and a **required** `timeZone`. The client builds that; `get_busy_times` defaults to every conflict-checked calendar |
+| Booking status filters | Cal ORs multiple `status` values and applies none when empty. `list_bookings` uses `upcoming,unconfirmed` by default and `upcoming,past,unconfirmed` for date ranges, so cancelled bookings only show when asked |
+| Paid event types | Prices live in `metadata.apps.<app>.price` (HitPay / Stripe), not the `price` field. `create_booking` **refuses** paid event types unless `allow_unpaid: true` (stricter than "warn" in §10) and offers the booking URL instead |
+| Slot pre-check | Strict: `start` must equal an open slot; otherwise the tool returns that day's open times and the next 5 slots without booking. `check_availability: false` lets Cal decide |
+| `$ref` in tool schemas | A zod schema reused inside one tool becomes a JSON-schema `$ref`, which some MCP clients cannot resolve (`update_schedule` had one). Fixed with schema factories and guarded by a unit test |
+| Redis TLS (Phase 0) | Implemented as a CI build-time patch in the fork's workflow (TLS opt-in via `REDIS_TLS=true`), deterministic and failing loudly if upstream changes; the URL-fragment trick stays documented for stock images. Patch step dry-run against the real `app.module.ts`: patches line 38, refuses a second run |
+| CI | `deploy-vps.yml` runs typecheck, unit tests and the smoke test (also on PRs) before any deploy — Plausible's workflow deploys untested |
+| Hosted header mode | `Authorization: Bearer usr_…` on `/mcp` (from mcp-zerobounce) in addition to path and query forms |
+| TOOLS.md | Generated from the registered tools at each access level, including every tool's minimum access level |
+| Tool count | 39 as planned: 17 / 28 / 39 for read / bookings / full; 7 destructive tools require `confirm: true` |
+
+**Verification**
+
+- `npm run typecheck` — clean.
+- `npm test` — 72/72 unit tests (connection rules + SSRF guard, key-service resolver, version map, DST-safe time
+  conversion and presets, HTTP client, formatting / hints, locations, tool registration per access level incl. no
+  `$ref` / no header parameters / confirm without API calls).
+- `npm run smoke` — 45/45 end-to-end checks: built HTTP server and CLI against a fake key service and a fake Cal API
+  v2 that enforces the API key and per-endpoint versions; hosted path / query / Bearer, self-hosted and stdio modes;
+  access-level gating; slot pre-check; paid-type refusal; web-app-URL and bad-key diagnosis; 401 / 403 / 405 / 503;
+  SSRF rejection; analytics gating; no keys in logs or analytics.
+- Docker stages replayed without Docker (no local Docker): build → production-only install → `/health` OK, `/mcp`
+  without auth → 401. `npm pack` contains only `dist/`, README, LICENSE, package.json. Workflow and compose YAML parse.
+- mcp-key-service: `npm test` passes with the calcom register / resolve / cross-server checks.
+
+**Still to do (needs you / the VPS)** — §5 and §8:
+
+1. Merge cal.diy PR #5 → wait for the API image → `techmavie/API-V2.md` on the VPS (secret, compose, nginx) →
+   create a Cal API key → `curl …/api/v2/me`.
+2. `npm run live-check` here with that key in `.env` (read-only) — booking writes only on your go-ahead, against a
+   hidden test event type.
+3. Add `calcom:<token>` to `INTERNAL_SERVER_TOKENS`, push `feat/calcom-connector` (redeploys the key service).
+4. `/opt/mcp-servers/calcom/.env`, nginx `location /calcom/`, GitHub secrets, then push `revamp/v2` → `main`.
 
 ---
 
