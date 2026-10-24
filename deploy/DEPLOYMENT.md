@@ -64,6 +64,11 @@ docker compose up -d --build
 docker compose logs -f --tail=50
 ```
 
+> **Never use `--remove-orphans` here, and keep `name: mcp-calcom` in `docker-compose.yml`.** Compose names a
+> project after its folder. Without the explicit name this stack would be "calcom", like Cal.diy in `/opt/calcom`,
+> and removing orphans in either folder deletes the other stack's containers. The first deploy took Cal.diy down
+> that way.
+
 ### 4. Configure nginx
 
 Add the `location /calcom/` block from `deploy/nginx-mcp.conf` to the `mcp.techmavie.digital` server block, then:

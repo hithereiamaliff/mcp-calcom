@@ -53,7 +53,15 @@ jobs:
             fi
 
             docker network inspect mcp-network >/dev/null 2>&1 || docker network create mcp-network
-            docker compose up -d --build --remove-orphans
+            docker compose build
+            # The first deploy ran under the folder's project name "calcom", shared with the Cal.diy
+            # stack in /opt/calcom. Move a container another project still owns to "mcp-calcom".
+            # Never remove orphans here: with a shared project name that deleted Cal.diy's containers.
+            project=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' mcp-calcom 2>/dev/null || true)
+            if [ -n "$project" ] && [ "$project" != "mcp-calcom" ]; then
+              docker rm -f mcp-calcom
+            fi
+            docker compose up -d
 
             HOST_PORT=$(grep -E '^HOST_PORT=' .env | cut -d= -f2 | tr -d '[:space:]')
             HOST_PORT=${HOST_PORT:-8102}

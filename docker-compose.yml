@@ -3,6 +3,11 @@
 #
 # Requires the shared external network (created by mcp-key-service):
 #   docker network create mcp-network
+#
+# Keep the project name. Without it Compose names the project after the folder ("calcom"),
+# the same as the Cal.diy stack in /opt/calcom, and removing orphans in either folder deletes
+# the other stack's containers — the first deploy took Cal.diy down that way.
+name: mcp-calcom
 
 services:
   mcp-calcom:
