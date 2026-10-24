@@ -1,0 +1,15 @@
+src/
+test/
+scripts/
+deploy/
+docs/
+.github/
+.claude/
+.env
+.env.*
+!.env.sample
+*.ts
+!dist/**/*.js
+tsconfig.json
+docker-compose.yml
+Dockerfile
